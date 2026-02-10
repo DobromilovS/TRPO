@@ -1,5 +1,5 @@
 def main():
-    print("52, да здраствует ...")
+    print("branch1_start")
     return 0
 
 if __name__ == "__main__":

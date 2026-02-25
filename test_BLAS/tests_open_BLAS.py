@@ -5,6 +5,8 @@ import ctypes
 import ctypes.util
 import os
 import sys
+import io
+from contextlib import redirect_stderr
 
 CblasRowMajor = 101
 
@@ -90,6 +92,30 @@ def zero(scalar_type, is_complex):
     if is_complex:
         return scalar_type(0.0, 0.0)
     return scalar_type(0)
+
+
+def run_test(func, func_name, test_fn, *args):
+    """Run test and capture stderr to check for error messages"""
+    # Создаем буфер для перехвата stderr
+    stderr_buffer = io.StringIO()
+    
+    try:
+        with redirect_stderr(stderr_buffer):
+            test_fn(func, *args)
+        
+        # Проверяем, не было ли сообщений об ошибках
+        stderr_output = stderr_buffer.getvalue()
+        if stderr_output and ("illegal value" in stderr_output.lower() or 
+                              "error" in stderr_output.lower() or
+                              "invalid" in stderr_output.lower()):
+            return False, f"library reported error: {stderr_output.strip()}"
+        
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    finally:
+        stderr_buffer.close()
+
 
 def test_gemm(fn, scalar, is_complex, A, B, C):
     fn.argtypes = [
@@ -267,50 +293,74 @@ def main():
         return 2
 
     all_pass = True
+    total_tests = 0
+    failed_tests = []
 
     for dtype in ["s", "d", "c", "z"]:
         A, B, C, scalar, is_complex = make_buffers(dtype)
 
         tests = []
 
-        tests.append((f"cblas_{dtype}gemm",   lambda fn: test_gemm(fn, scalar, is_complex, A, B, C)))
-        tests.append((f"cblas_{dtype}gemmtr", lambda fn: test_gemmtr(fn, scalar, is_complex, A, B, C)))
+        tests.append(("cblas_{}gemm".format(dtype), test_gemm, 
+                     (scalar, is_complex, A, B, C)))
+        tests.append(("cblas_{}gemmtr".format(dtype), test_gemmtr, 
+                     (scalar, is_complex, A, B, C)))
 
-        tests.append((f"cblas_{dtype}symm", lambda fn: test_symm_like(fn, scalar, is_complex, A, B, C)))
+        tests.append(("cblas_{}symm".format(dtype), test_symm_like, 
+                     (scalar, is_complex, A, B, C)))
         if dtype in ["c", "z"]:
-            tests.append((f"cblas_{dtype}hemm", lambda fn: test_symm_like(fn, scalar, is_complex, A, B, C)))
+            tests.append(("cblas_{}hemm".format(dtype), test_symm_like, 
+                         (scalar, is_complex, A, B, C)))
 
-        tests.append((f"cblas_{dtype}trmm", lambda fn: test_trmm_trsm(fn, scalar, is_complex, A, B)))
-        tests.append((f"cblas_{dtype}trsm", lambda fn: test_trmm_trsm(fn, scalar, is_complex, A, B)))
+        tests.append(("cblas_{}trmm".format(dtype), test_trmm_trsm, 
+                     (scalar, is_complex, A, B)))
+        tests.append(("cblas_{}trsm".format(dtype), test_trmm_trsm, 
+                     (scalar, is_complex, A, B)))
 
-        tests.append((f"cblas_{dtype}syrk", lambda fn: test_syrk(fn, scalar, is_complex, A, C)))
+        tests.append(("cblas_{}syrk".format(dtype), test_syrk, 
+                     (scalar, is_complex, A, C)))
         if dtype in ["c", "z"]:
-            tests.append((f"cblas_{dtype}herk", lambda fn: test_herk(fn, A, C)))
+            tests.append(("cblas_{}herk".format(dtype), test_herk, 
+                         (A, C)))
 
-        tests.append((f"cblas_{dtype}syr2k", lambda fn: test_syr2k(fn, scalar, is_complex, A, B, C)))
+        tests.append(("cblas_{}syr2k".format(dtype), test_syr2k, 
+                     (scalar, is_complex, A, B, C)))
         if dtype in ["c", "z"]:
-            tests.append((f"cblas_{dtype}her2k", lambda fn: test_her2k(fn, scalar, A, B, C)))
+            tests.append(("cblas_{}her2k".format(dtype), test_her2k, 
+                         (scalar, A, B, C)))
 
-        print(f"\ndtype {dtype}")
-        for name, caller in tests:
+        print(f"\n=== Testing dtype {dtype} ===")
+        for name, test_func, args in tests:
+            total_tests += 1
             fn = get_func(lib, name)
             if fn is None:
-                print("[FAIL]", name, "(symbol not found)")
+                print(f"  [FAIL] {name} (symbol not found)")
                 all_pass = False
+                failed_tests.append(name)
                 continue
 
-            try:
-                caller(fn)
-                print("[PASS]", name)
-            except Exception as e:
-                print("[FAIL]", name, "-", type(e).__name__, e)
+            success, error_msg = run_test(fn, name, test_func, *args)
+            if success:
+                print(f"  [PASS] {name}")
+            else:
+                print(f"  [FAIL] {name} - {error_msg}")
                 all_pass = False
+                failed_tests.append(name)
+
+    print(f"\n=== Summary ===")
+    print(f"Total tests: {total_tests}")
+    if failed_tests:
+        print(f"Failed tests: {len(failed_tests)}")
+        for test in failed_tests:
+            print(f"  - {test}")
+    else:
+        print(f"Failed tests: 0")
 
     if all_pass:
-        print("\n[OK] All Level 3 functions found and called without errors")
+        print("\n[OK] All Level 3 functions working correctly")
         return 0
 
-    print("\n[FAIL] Errors encountered (symbol not found or exception during call)")
+    print("\n[FAIL] Some tests failed")
     return 1
 
 

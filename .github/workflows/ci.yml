@@ -23,4 +23,4 @@ jobs:
         run: python3 "test_BLAS_(lab4)/tests_open_BLAS.py" --threads 1
 
       - name: Run performance tests
-        run: python3 "test_BLAS_(lab4)/performance_open_BLAS.py" --threads 1 --size 128 --repeat 5 --min-gflops 0.01
+        run: python3 "test_BLAS_(lab4)/performance_open_BLAS.py" --threads 1 --size 128 --repeat 5 --min-gflops 999999

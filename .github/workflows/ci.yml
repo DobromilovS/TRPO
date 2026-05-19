@@ -1,0 +1,26 @@
+name: BLAS CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  blas-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install OpenBLAS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev
+
+      - name: Run interface tests
+        run: python3 "test_BLAS_(lab4)/tests_open_BLAS.py" --threads 1
+
+      - name: Run performance tests
+        run: python3 "test_BLAS_(lab4)/performance_open_BLAS.py" --threads 1 --size 128 --repeat 5 --min-gflops 0.01

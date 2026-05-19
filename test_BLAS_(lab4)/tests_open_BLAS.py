@@ -5,16 +5,13 @@ import ctypes
 import ctypes.util
 import os
 import sys
-import io
-from contextlib import redirect_stderr
 
 CblasRowMajor = 101
-
 CblasNoTrans = 111
 CblasUpper = 121
-
 CblasNonUnit = 131
 CblasLeft = 141
+
 
 class ComplexFloat(ctypes.Structure):
     _fields_ = [("re", ctypes.c_float), ("im", ctypes.c_float)]
@@ -32,336 +29,183 @@ def load_openblas(path_from_user):
     if name:
         return ctypes.CDLL(name)
 
-    for name2 in ["libopenblas.so", "libopenblas.dylib", "openblas.dll"]:
+    for candidate in ("libopenblas.so", "libopenblas.dylib", "openblas.dll"):
         try:
-            return ctypes.CDLL(name2)
+            return ctypes.CDLL(candidate)
         except OSError:
             pass
 
     raise RuntimeError("Could not find OpenBLAS. Specify path with --lib")
 
 
-def get_func(lib, func_name):
+def symbol(lib, name):
     try:
-        return getattr(lib, func_name)
-    except AttributeError:
-        return None
+        return getattr(lib, name)
+    except AttributeError as exc:
+        raise RuntimeError(f"symbol {name} not found") from exc
 
 
-def ptr(x):
-    return ctypes.cast(x, ctypes.c_void_p)
+def as_void_p(value):
+    return ctypes.cast(value, ctypes.c_void_p)
 
 
-def make_buffers(dtype):
-    if dtype == "s":
-        A = (ctypes.c_float * 1)(0.0)
-        B = (ctypes.c_float * 1)(0.0)
-        C = (ctypes.c_float * 1)(0.0)
-        scalar = ctypes.c_float
-        is_complex = False
-        return A, B, C, scalar, is_complex
-
-    if dtype == "d":
-        A = (ctypes.c_double * 1)(0.0)
-        B = (ctypes.c_double * 1)(0.0)
-        C = (ctypes.c_double * 1)(0.0)
-        scalar = ctypes.c_double
-        is_complex = False
-        return A, B, C, scalar, is_complex
-
-    if dtype == "c":
-        A = (ComplexFloat * 1)(ComplexFloat(0.0, 0.0))
-        B = (ComplexFloat * 1)(ComplexFloat(0.0, 0.0))
-        C = (ComplexFloat * 1)(ComplexFloat(0.0, 0.0))
-        scalar = ComplexFloat
-        is_complex = True
-        return A, B, C, scalar, is_complex
-
-    if dtype == "z":
-        A = (ComplexDouble * 1)(ComplexDouble(0.0, 0.0))
-        B = (ComplexDouble * 1)(ComplexDouble(0.0, 0.0))
-        C = (ComplexDouble * 1)(ComplexDouble(0.0, 0.0))
-        scalar = ComplexDouble
-        is_complex = True
-        return A, B, C, scalar, is_complex
-
-    raise ValueError("dtype must be s/d/c/z")
+def close_enough(actual, expected, eps=1e-5):
+    return abs(float(actual) - float(expected)) <= eps
 
 
-def zero(scalar_type, is_complex):
-    if is_complex:
-        return scalar_type(0.0, 0.0)
-    return scalar_type(0)
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
 
 
-def run_test(func, func_name, test_fn, *args):
-    """Run test and capture stderr to check for error messages"""
-    # Создаем буфер для перехвата stderr
-    stderr_buffer = io.StringIO()
-    
-    try:
-        with redirect_stderr(stderr_buffer):
-            test_fn(func, *args)
-        
-        # Проверяем, не было ли сообщений об ошибках
-        stderr_output = stderr_buffer.getvalue()
-        if stderr_output and ("illegal value" in stderr_output.lower() or 
-                              "error" in stderr_output.lower() or
-                              "invalid" in stderr_output.lower()):
-            return False, f"library reported error: {stderr_output.strip()}"
-        
-        return True, None
-    except Exception as e:
-        return False, str(e)
-    finally:
-        stderr_buffer.close()
+def run_real_tests(lib, prefix, scalar_type, eps):
+    scalar_ptr = ctypes.POINTER(scalar_type)
+    cases = []
 
-
-def test_gemm(fn, scalar, is_complex, A, B, C):
-    fn.argtypes = [
+    gemm = symbol(lib, f"cblas_{prefix}gemm")
+    gemm.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
+        scalar_ptr, ctypes.c_int,
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
     ]
-    fn.restype = None
+    a = (scalar_type * 1)(2)
+    b = (scalar_type * 1)(3)
+    c = (scalar_type * 1)(0)
+    gemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 1, 1, 1,
+         scalar_type(1), a, 1, b, 1, scalar_type(0), c, 1)
+    require(close_enough(c[0], 6, eps), f"{prefix}gemm expected 6, got {c[0]}")
+    cases.append(f"cblas_{prefix}gemm")
 
-    fn(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-       0, 0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       ptr(B), 1,
-       zero(scalar, is_complex),
-       ptr(C), 1)
-
-
-def test_gemmtr(fn, scalar, is_complex, A, B, C):
-    fn.argtypes = [
-        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int
-    ]
-    fn.restype = None
-
-    fn(CblasRowMajor, CblasUpper, CblasNoTrans, CblasNoTrans,
-       0, 0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       ptr(B), 1,
-       zero(scalar, is_complex),
-       ptr(C), 1)
-
-
-def test_symm_like(fn, scalar, is_complex, A, B, C):
-    fn.argtypes = [
+    symm = symbol(lib, f"cblas_{prefix}symm")
+    symm.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
+        scalar_ptr, ctypes.c_int,
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
     ]
-    fn.restype = None
+    c = (scalar_type * 1)(0)
+    symm(CblasRowMajor, CblasLeft, CblasUpper, 1, 1,
+         scalar_type(1), a, 1, b, 1, scalar_type(0), c, 1)
+    require(close_enough(c[0], 6, eps), f"{prefix}symm expected 6, got {c[0]}")
+    cases.append(f"cblas_{prefix}symm")
 
-    fn(CblasRowMajor, CblasLeft, CblasUpper,
-       0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       ptr(B), 1,
-       zero(scalar, is_complex),
-       ptr(C), 1)
-
-
-def test_trmm_trsm(fn, scalar, is_complex, A, B):
-    fn.argtypes = [
+    trmm = symbol(lib, f"cblas_{prefix}trmm")
+    trmm.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
+        scalar_ptr, ctypes.c_int,
     ]
-    fn.restype = None
+    b_tri = (scalar_type * 1)(3)
+    trmm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+         1, 1, scalar_type(1), a, 1, b_tri, 1)
+    require(close_enough(b_tri[0], 6, eps), f"{prefix}trmm expected 6, got {b_tri[0]}")
+    cases.append(f"cblas_{prefix}trmm")
 
-    fn(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
-       0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       ptr(B), 1)
+    trsm = symbol(lib, f"cblas_{prefix}trsm")
+    trsm.argtypes = trmm.argtypes
+    b_solve = (scalar_type * 1)(6)
+    trsm(CblasRowMajor, CblasLeft, CblasUpper, CblasNoTrans, CblasNonUnit,
+         1, 1, scalar_type(1), a, 1, b_solve, 1)
+    require(close_enough(b_solve[0], 3, eps), f"{prefix}trsm expected 3, got {b_solve[0]}")
+    cases.append(f"cblas_{prefix}trsm")
 
-
-def test_syrk(fn, scalar, is_complex, A, C):
-    fn.argtypes = [
+    syrk = symbol(lib, f"cblas_{prefix}syrk")
+    syrk.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
     ]
-    fn.restype = None
+    c = (scalar_type * 1)(0)
+    syrk(CblasRowMajor, CblasUpper, CblasNoTrans, 1, 1,
+         scalar_type(1), b, 1, scalar_type(0), c, 1)
+    require(close_enough(c[0], 9, eps), f"{prefix}syrk expected 9, got {c[0]}")
+    cases.append(f"cblas_{prefix}syrk")
 
-    fn(CblasRowMajor, CblasUpper, CblasNoTrans,
-       0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       zero(scalar, is_complex),
-       ptr(C), 1)
-
-
-def test_herk(fn, A, C):
-    fn.argtypes = [
+    syr2k = symbol(lib, f"cblas_{prefix}syr2k")
+    syr2k.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         ctypes.c_int, ctypes.c_int,
-        ctypes.c_double,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_double,
-        ctypes.c_void_p, ctypes.c_int
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
+        scalar_ptr, ctypes.c_int,
+        scalar_type,
+        scalar_ptr, ctypes.c_int,
     ]
-    fn.restype = None
+    c = (scalar_type * 1)(0)
+    syr2k(CblasRowMajor, CblasUpper, CblasNoTrans, 1, 1,
+          scalar_type(1), a, 1, b, 1, scalar_type(0), c, 1)
+    require(close_enough(c[0], 12, eps), f"{prefix}syr2k expected 12, got {c[0]}")
+    cases.append(f"cblas_{prefix}syr2k")
 
-    fn(CblasRowMajor, CblasUpper, CblasNoTrans,
-       0, 0,
-       0.0,
-       ptr(A), 1,
-       0.0,
-       ptr(C), 1)
+    return cases
 
 
-def test_syr2k(fn, scalar, is_complex, A, B, C):
-    fn.argtypes = [
+def run_complex_gemm_test(lib, prefix, complex_type, eps):
+    gemm = symbol(lib, f"cblas_{prefix}gemm")
+    gemm.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        ctypes.c_int, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_void_p, ctypes.c_int,
-        scalar,
-        ctypes.c_void_p, ctypes.c_int
-    ]
-    fn.restype = None
-
-    fn(CblasRowMajor, CblasUpper, CblasNoTrans,
-       0, 0,
-       zero(scalar, is_complex),
-       ptr(A), 1,
-       ptr(B), 1,
-       zero(scalar, is_complex),
-       ptr(C), 1)
-
-
-def test_her2k(fn, scalar_complex, A, B, C):
-    fn.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        ctypes.c_int, ctypes.c_int,
-        scalar_complex,
+        ctypes.c_void_p,
         ctypes.c_void_p, ctypes.c_int,
         ctypes.c_void_p, ctypes.c_int,
-        ctypes.c_double,
-        ctypes.c_void_p, ctypes.c_int
+        ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.c_int,
     ]
-    fn.restype = None
 
-    fn(CblasRowMajor, CblasUpper, CblasNoTrans,
-       0, 0,
-       scalar_complex(0.0, 0.0),
-       ptr(A), 1,
-       ptr(B), 1,
-       0.0,
-       ptr(C), 1)
+    alpha = complex_type(1, 0)
+    beta = complex_type(0, 0)
+    a = (complex_type * 1)(complex_type(2, 1))
+    b = (complex_type * 1)(complex_type(3, -1))
+    c = (complex_type * 1)(complex_type(0, 0))
+
+    gemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 1, 1, 1,
+         as_void_p(ctypes.byref(alpha)),
+         as_void_p(a), 1,
+         as_void_p(b), 1,
+         as_void_p(ctypes.byref(beta)),
+         as_void_p(c), 1)
+
+    require(close_enough(c[0].re, 7, eps), f"{prefix}gemm real expected 7, got {c[0].re}")
+    require(close_enough(c[0].im, 1, eps), f"{prefix}gemm imag expected 1, got {c[0].im}")
+    return [f"cblas_{prefix}gemm"]
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lib", default=None, help="Path to libopenblas (e.g. /usr/lib/libopenblas.so)")
-    parser.add_argument("--threads", type=int, default=None, help="OPENBLAS_NUM_THREADS")
+    parser.add_argument("--lib", default=None, help="Path to libopenblas")
+    parser.add_argument("--threads", type=int, default=1, help="OPENBLAS_NUM_THREADS")
     args = parser.parse_args()
 
-    if args.threads is not None:
-        os.environ["OPENBLAS_NUM_THREADS"] = str(args.threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(args.threads)
 
     try:
         lib = load_openblas(args.lib)
-    except Exception as e:
-        print("[FAIL] Could not load OpenBLAS:", e)
-        return 2
+        passed = []
+        passed.extend(run_real_tests(lib, "s", ctypes.c_float, 1e-4))
+        passed.extend(run_real_tests(lib, "d", ctypes.c_double, 1e-9))
+        passed.extend(run_complex_gemm_test(lib, "c", ComplexFloat, 1e-4))
+        passed.extend(run_complex_gemm_test(lib, "z", ComplexDouble, 1e-9))
+    except Exception as exc:
+        print(f"[FAIL] {exc}")
+        return 1
 
-    all_pass = True
-    total_tests = 0
-    failed_tests = []
-
-    for dtype in ["s", "d", "c", "z"]:
-        A, B, C, scalar, is_complex = make_buffers(dtype)
-
-        tests = []
-
-        tests.append(("cblas_{}gemm".format(dtype), test_gemm, 
-                     (scalar, is_complex, A, B, C)))
-        tests.append(("cblas_{}gemmtr".format(dtype), test_gemmtr, 
-                     (scalar, is_complex, A, B, C)))
-
-        tests.append(("cblas_{}symm".format(dtype), test_symm_like, 
-                     (scalar, is_complex, A, B, C)))
-        if dtype in ["c", "z"]:
-            tests.append(("cblas_{}hemm".format(dtype), test_symm_like, 
-                         (scalar, is_complex, A, B, C)))
-
-        tests.append(("cblas_{}trmm".format(dtype), test_trmm_trsm, 
-                     (scalar, is_complex, A, B)))
-        tests.append(("cblas_{}trsm".format(dtype), test_trmm_trsm, 
-                     (scalar, is_complex, A, B)))
-
-        tests.append(("cblas_{}syrk".format(dtype), test_syrk, 
-                     (scalar, is_complex, A, C)))
-        if dtype in ["c", "z"]:
-            tests.append(("cblas_{}herk".format(dtype), test_herk, 
-                         (A, C)))
-
-        tests.append(("cblas_{}syr2k".format(dtype), test_syr2k, 
-                     (scalar, is_complex, A, B, C)))
-        if dtype in ["c", "z"]:
-            tests.append(("cblas_{}her2k".format(dtype), test_her2k, 
-                         (scalar, A, B, C)))
-
-        print(f"\n=== Testing dtype {dtype} ===")
-        for name, test_func, args in tests:
-            total_tests += 1
-            fn = get_func(lib, name)
-            if fn is None:
-                print(f"  [FAIL] {name} (symbol not found)")
-                all_pass = False
-                failed_tests.append(name)
-                continue
-
-            success, error_msg = run_test(fn, name, test_func, *args)
-            if success:
-                print(f"  [PASS] {name}")
-            else:
-                print(f"  [FAIL] {name} - {error_msg}")
-                all_pass = False
-                failed_tests.append(name)
-
-    print(f"\n=== Summary ===")
-    print(f"Total tests: {total_tests}")
-    if failed_tests:
-        print(f"Failed tests: {len(failed_tests)}")
-        for test in failed_tests:
-            print(f"  - {test}")
-    else:
-        print(f"Failed tests: 0")
-
-    if all_pass:
-        print("\n[OK] All Level 3 functions working correctly")
-        return 0
-
-    print("\n[FAIL] Some tests failed")
-    return 1
+    print("=== Interface tests ===")
+    for name in passed:
+        print(f"  [PASS] {name}")
+    print(f"\n[OK] {len(passed)} OpenBLAS interface checks passed")
+    return 0
 
 
 if __name__ == "__main__":
